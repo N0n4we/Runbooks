@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-LoraCI - Anima LoRA training entry point with email notification.
+LoraCLI - Anima LoRA training entry point with email notification.
 
 Usage:
     python train.py --config_file ~/models/topic.toml
 
-Email notification is triggered on both success and failure. SMTP is
-configured via environment variables (see scripts/notify_email.py for the
-full list).
+Email notification is optional and triggered on both success and failure.
+It is a no-op unless SMTP is configured via environment variables:
+SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, NOTIFY_EMAIL.
 
 Why try/except wraps imports too: train_util.read_config_from_file calls
 sys.exit(1) on bad config, which raises SystemExit (a BaseException, not
@@ -90,7 +90,7 @@ if __name__ == "__main__":
 
         elapsed = datetime.now() - start_time
         send_email(
-            f"[LoraCI] {config_name} - training complete",
+            f"[LoraCLI] {config_name} - training complete",
             f"Host: {socket.gethostname()}\n"
             f"Config: {config_file_for_msg}\n"
             f"Duration: {elapsed}\n"
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
         send_email(
-            f"[LoraCI] {config_name} - training failed",
+            f"[LoraCLI] {config_name} - training failed",
             f"Host: {socket.gethostname()}\n"
             f"Config: {config_file_for_msg}\n"
             f"Duration: {elapsed}\n"

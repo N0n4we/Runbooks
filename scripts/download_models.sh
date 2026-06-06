@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LoraCI base model downloader.
+# LoraCLI base model downloader.
 #
 # Downloads Anima base models to MODEL_DIR if they are not already present.
 # Fails loudly when a download URL has not been configured, so missing models
