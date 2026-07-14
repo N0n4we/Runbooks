@@ -1,6 +1,7 @@
 # Anima-Standalone-Trainer 部署手册
 
 > 本手册按 2026-06-07 实际跑通的案例编写（maruko_v4，RTX 5090）。
+> 2026-07-14 在第二个实例 `nI3WCI@wp08.unicorn.org.cn -p 19659` 二次验证通过（liu_v1，57 图），新踩坑见文末踩坑表与各节补充。
 
 ## 0. 环境（本次实测）
 
@@ -47,7 +48,10 @@ pip install --upgrade pip setuptools wheel
 `requirements.txt` 已 pin `torch==2.7.0+cu128`，**正好匹配驱动 570**，且支持 RTX 5090 的 Blackwell（sm_120）。直接装即可：
 
 ```bash
-pip install -r requirements.txt        # 含 torch 2.7.0+cu128 / accelerate / bitsandbytes 等
+# 注意：二次验证实例(19659) pytorch.org 直连被墙，requirements 里的 --extra-index-url 走不通 →
+# 用阿里源作主 index（torch wheel 命中即用、cache 复用），并加 --retries/--timeout 防包文件间歇超时；
+# 实测单轮即成(`Using cached ... +cu128`)。若仍卡，套 retry-loop（整轮失败重启）后台 nohup 跑。
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --retries 30 --timeout 60
 # 验证 GPU 可用
 python -c "import torch;print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 # 期望: 2.7.0+cu128 True NVIDIA GeForce RTX 5090
@@ -210,3 +214,6 @@ scp -P 15864 dxpb3F@wp08.unicorn.org.cn:~/Anima-Standalone-Trainer/jobs/maruko_v
 | HF 下载无响应 | HuggingFace 被墙 | 全部换 `hf-mirror.com` |
 | 数据集解压失败 | 容器无 `unzip` | 用 `python3 -c "import zipfile;..."` |
 | nohup 里 `~` 不展开 | 非交互 shell | 配置内全用绝对路径 `/home/dxpb3F/...` |
+| `pip install -r` 直连卡死 40min+ 不动 | `download.pytorch.org/whl/cu128` 直连被墙；且各 PyPI 镜像**包文件**下载间歇超时（index 页通、wheel 随机卡） | 改用阿里源 `-i https://mirrors.aliyun.com/pypi/simple/ --retries 30 --timeout 60`，并套 retry-loop（整轮失败重启）；torch wheel 一旦下进 cache 即 `Using cached` 复用，不再走 pytorch.org |
+| `bubu_v1.toml` 单文件 `dataset_config=""` 跑不通 | `dataset_config` 被当数据集配置文件加载，`""`→`"."` → file not found；改成指向自身后 voluptuous 把整个文件喂给数据集 schema，`model_arguments` 等被报 `extra keys not allowed` | **必须按第 6 节拆成两文件**：主 config（`model/training/network/anima_arguments`，多余 key 被扁平化忽略）+ 独立 `dataset.toml`（只含 `[general]`/`[[datasets]]`），`dataset_config` 指向后者。`bubu_v1.toml` 那种单文件内联是跑不通的模板遗留 |
+| GitHub 仓库直连即可 | 两次实例 `codeload.github.com/<repo>/tar.gz/refs/heads/main` 均直连成功且 gzip 校验通过，无需 ghfast.top | 优先 codeload 直连；失败再回退 ghfast.top |
