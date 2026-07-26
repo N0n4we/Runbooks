@@ -131,9 +131,9 @@ setsid nohup comfy run --workflow ~/bernini_workflow.json --host 127.0.0.1 --por
 ```bash
 python3 run_bernini.py --image ~/Documents/Games/input_maruko_1.png --out ~/Downloads/out.mp4
 # 常用参数：--prompt / --task i2v / --frames 81 或 --seconds 5 / --size 640x864
-#          --fps 17 / --steps 4 --split 2 --seed N --cfg H,L
-#          --lora-high H.safetensors --lora-low L.safetensors --lora-strength 0.8
-#          --extra-lora XXX.safetensors:0.6（追加第三条，24G 慎用）
+#          --fps 16 / --steps 4 --split 2 --seed N --cfg H,L
+#          --lora-high A.safetensors B.safetensors:0.6   （高噪链，可多个，:强度 缺省 1.0）
+#          --lora-low  A.safetensors B.safetensors:0.6   （低噪链；第 2 个起自动串联插节点）
 ```
 
 行为：上传输入图 → 内存中给共享 json 打补丁（虚拟节点映射/LoRA/画布/帧数/auto_enhance=false）→ 服务器提交 → 轮询拉回 → ffprobe 验证。默认配置 480×640×81帧@17fps（4.76s）。**脚本默认服务器 Lt2s9y@13988**。
