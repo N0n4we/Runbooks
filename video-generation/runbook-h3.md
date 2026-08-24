@@ -1,6 +1,11 @@
 # MiniMax H3 全模态视频生成 — 部署与执行 Runbook
 
-> **两台目标机，选型不同且都不是偏好问题——是内核可用性问题。见 §12（现行主机）。**
+> **当前实装（2026-08-25）**：`KKujSt@wp08.unicorn.org.cn:14590`（RTX 4090 24GB）已部署并验收。
+> 当前方案是 **FL2VA INT8 ConvRot DiT + NVFP4 text encoder + Larry Turbo LoRA**；
+> 默认主机已切换为 `--host kk14590`，详细重建、启动和验收步骤见 **§13**。
+> `ref2va` 本次不部署；§13 之外的 3090 / 5090 / R2VA 内容保留为历史参考。
+
+> **两台历史目标机的选型不同且都不是偏好问题——是内核可用性问题。当前实装见 §13；§12 为 5090 历史记录。**
 >
 > | 档位 | 主机 | GPU | DiT / 编码器 | 后端 | 实测 |
 > |---|---|---|---|---|---|
@@ -10,7 +15,7 @@
 > 底图：四个 Qwen3VL 模板（T2VA / I2VA / FL2VA / R2VA），推理链封装在同一子图（实例 #105）。
 > 一键脚本：`run-h3.py`（文本 / 首帧 / 首尾帧 / 参考图；支持 `--lora`；参考视频与音频不支持，见 §11）。
 >
-> ⚠️ 阅读顺序：**§12 是现行主机（5090 + int8）的完整实测结论，与它冲突的一律以 §12 为准。**
+> ⚠️ 阅读顺序：**§13 是当前主机（4090 + INT8 ConvRot + NVFP4 + Larry）的完整实装结论，与历史章节冲突时以 §13 为准。**
 > §9 / §10 / §11 是四模板通用结论。§1 的环境记录属 4090，§2 的 int8 选型表与 §5 的验证记录
 > 是**更早的 3090 机器**历史记录，保留作对照。
 
@@ -27,7 +32,7 @@ MiniMax H3 = 全模态打包 DiT：文本/图像/视频/音频统一上下文理
 - 无负面词、无 CFG（BasicGuider=1）；采样 res_multistep + simple 20 步为官方模板默认。
 - 帧数网格 **17k+5 @24fps**（5s=124 帧），训练范围 124~362 帧（≈5~15s）；画布 32 倍数，原生 768 短边、面积上限 768×1344。
 
-## 1. 环境与网络（`--host 4090` 档位，wp08:25304 / RTX 4090 实测，2026-08-06；5090 见 §12）
+## 1. 环境与网络（历史记录；当前 `kk14590` 见 §13）
 
 - **本机 GitHub / HuggingFace / hf-mirror 全不可达**，只有 **ModelScope + aliyun pypi** 通；ComfyUI 主程序走 `gh-proxy.com` 中转（旧版这里写「codeload.github.com 直连可达」——那是旧机器，本机实测不通）：
   ```bash
@@ -131,7 +136,7 @@ python3 run-h3.py --dry-run --prompt "……" [--image a.png | --ref-image r.png
 
 ## 5. 验证记录 — ⚠️ 旧机器（wp08:33307 / RTX 3090 24G / int8 / `--lowvram --reserve-vram 5`，2026-08-04）
 
-> **本节是历史记录，配置已不适用于现行 4090 + int4 + NORMAL_VRAM 方案**（见 §9）。
+> **本节是历史记录，配置已不适用于当前 `kk14590` 的 INT8 ConvRot + NVFP4 + NORMAL_VRAM 方案**（见 §13）。
 > 保留是因为其中的 OOM 归因与帧数/音轨门禁方法仍有参考价值。
 > 四个 Qwen3VL 新模板在 4090 上的真实渲染记录**尚未补齐**（服务器停机），待补。
 
@@ -153,7 +158,7 @@ python3 run-h3.py --dry-run --prompt "……" [--image a.png | --ref-image r.png
 
 | 症状 | 原因/处理 |
 |---|---|
-| SamplerCustomAdvanced OOM，栈落 `int8_linear→torch.cat`，boot log 见 DiT `loaded completely ~20G` | **旧机器 int8 场景**：legacy ModelPatcher 把 21G DiT 整载进 24G，无暂存余量 → 启动加 `--reserve-vram 5` 强制部分加载流式（§5 历史记录）。现行 int4 DiT 仅 10.56G，不适用 |
+| SamplerCustomAdvanced OOM，栈落 `int8_linear→torch.cat`，boot log 见 DiT `loaded completely ~20G` | **旧机器 int8 场景**：legacy ModelPatcher 把 21G DiT 整载进 24G，无暂存余量 → 启动加 `--reserve-vram 5` 强制部分加载流式（§5 历史记录）。历史 int4 DiT 约 10.56G，不适用于当前 kk14590 |
 | `comfy run` 提交即败，报 git/GitPython | 裸容器无 git → `apt-get install git` |
 | 官方 i2v 模板校验 `required input 'image' is missing`（节点 119） | 旧模板遗留问题，已随旧模板删除；四个 Qwen3VL 模板各自有独立 LoadImage，不再适用 |
 | CLIPLoader 报 nvfp4 相关错 | 模板默认 qwen3vl nvfp4 是 Blackwell(sm_120) 专用 → 换 `qwen3vl_32b_minimax_h3_int4_convrot`（脚本 `rewrite_weights()` 已自动，type 保持 `minimax`） |
@@ -283,7 +288,7 @@ Qwen 以 2fps 带时间戳读取。
 
 ---
 
-## 12. 5090 / INT8 部署与实测（2026-08-08，**现行主机**）
+## 12. 历史：5090 / INT8 部署与实测（2026-08-08）
 
 `PER3cU@wp08.unicorn.org.cn -p 21054` / RTX 5090 32G **sm_120** / ComfyUI **0.31.0** /
 torch `2.7.0.dev20250310+cu128`（cu128，勿动，见 §12-G）/ **triton 3.3.1（用户级，必装）** /
@@ -510,3 +515,113 @@ python3 -c "import triton,os;print(triton.__version__, os.path.dirname(triton.__
 
 **操作提醒**：给任意自定义节点 `.py` 打补丁后必须**重启 ComfyUI 才生效**（模块启动时已载入内存）。重启命令见 §12-A；重启顺带清掉上次残留的 ~26GB 驻留显存（`nvidia-smi` 验证空闲 <1GB 占用再跑）。
 
+---
+
+## 13. 当前实装：4090 / INT8 ConvRot + NVFP4 + Larry（2026-08-25）
+
+本节是当前 `kk14590` 目标机的唯一操作依据；前面的 3090、旧 4090、5090 和 R2VA
+记录只用于解释历史决策，不要把其中的主机、权重或启动参数直接套到本机。
+
+### 13-A. 目标机与环境
+
+| 项目 | 当前值 |
+|---|---|
+| SSH | `KKujSt@wp08.unicorn.org.cn -p 14590` |
+| GPU | NVIDIA GeForce RTX 4090，24GB，sm_89 |
+| 驱动 / CUDA | 570.86.10 / CUDA 12.8 |
+| Python | `/usr/bin/python3` 3.10.12 |
+| PyTorch | `2.7.0.dev20250310+cu128` |
+| ComfyUI | `~/comfy/ComfyUI`，0.33.0 |
+| Python 环境 | `~/h3-venv`（`--system-site-packages`，复用系统 CUDA PyTorch） |
+| 服务 | `127.0.0.1:8188`，`NORMAL_VRAM`，`--reserve-vram 1` |
+
+部署时先验证 CUDA，不要为了安装普通依赖覆盖预装 torch：
+
+```bash
+~/h3-venv/bin/python -c \
+  "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+# 应为：2.7.0.dev20250310+cu128 / 12.8 / True / NVIDIA GeForce RTX 4090
+```
+
+### 13-B. 当前权重清单
+
+以下文件位于 `~/comfy/ComfyUI/models/`，均已用 `safetensors.safe_open` 验证：
+
+| 目录 | 文件 | 约大小 | 张量数 |
+|---|---|---:|---:|
+| `diffusion_models/` | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | 20.97GB | 932 |
+| `text_encoders/` | `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | 15.69GB | 2054 |
+| `vae/` | `minimax_h3_video_vae_fp16.safetensors` | 5.21GB | 562 |
+| `vae/` | `minimax_h3_audio_vae_fp32.safetensors` | 0.61GB | 917 |
+| `loras/` | `minimax_h3_turbo_v4_step600_ema.safetensors` | 0.78GB | 518 |
+
+本次不下载、不保留 `ref2va` DiT。模型来源和 Larry 节点说明：
+[官方 MiniMax-H3 模型页](https://huggingface.co/Comfy-Org/MiniMax-H3)、
+[Larry 节点仓库](https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo)、
+[Larry LoRA 模型页](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)。
+
+### 13-C. ComfyUI 启动与重启
+
+所有长任务都应使用后台方式启动；日志放在部署目录，避免 SSH 断线杀掉服务：
+
+```bash
+ssh -p 14590 KKujSt@wp08.unicorn.org.cn
+cd ~/comfy/ComfyUI
+setsid nohup ~/h3-venv/bin/python main.py \
+  --listen 127.0.0.1 --port 8188 --disable-auto-launch \
+  --reserve-vram 1 \
+  > ~/h3-deploy/log/comfy.log 2>&1 </dev/null &
+```
+
+验收服务，不要用远端未安装的 `rg`：
+
+```bash
+curl --max-time 15 -fsS http://127.0.0.1:8188/system_stats
+ps -eo pid,etime,cmd | grep '[p]ython main.py --listen 127.0.0.1 --port 8188'
+nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader
+```
+
+### 13-D. Larry 接法与运行命令
+
+`run-h3.py` 的 `--host kk14590` 自动选择 INT8 ConvRot DiT 和 NVFP4 encoder；LoRA 文件名含
+`turbo` 时，`--lora-backend auto` 自动插入 `MiniMaxH3TurboLoRA` 与
+`MiniMaxH3TurboSampler`，不应改成普通 `LoraLoaderModelOnly`。Larry v4 step600 使用
+6~8 steps、strength 1.0、`simple` scheduler：
+
+```bash
+python3 video-generation/run-h3.py \
+  --host kk14590 \
+  --prompt 'A red kite glides over a calm blue lake while distant birds create a natural stereo soundscape.' \
+  --lora minimax_h3_turbo_v4_step600_ema.safetensors:1.0 \
+  --steps 6 --frames 124 --size 256x256
+```
+
+默认旁路 QwenVL 增强、TensorRT 后处理和 SageAttention，保证核心 FL2VA 链直接出
+`H3_<run_id>*.mp4`。当前已实测输出包含 H.264 视频和 AAC 双声道音轨。
+
+### 13-E. 显存行为与已知限制
+
+- text encoder 日志：`loaded completely; ... 14960.20 MB loaded, full load: True`。
+- DiT 日志：`loaded completely; ... 19996.14 MB loaded, full load: True`。
+- 两者是**分别整块装入显存**；24GB 卡不能让 encoder、DiT、采样激活同时常驻，ComfyUI
+  会按编码和采样阶段换载，这是预期行为。
+- Larry 生效日志应同时出现 `MiniMaxH3TurboLoRA`、`H3TURBO sampler`，以及
+  `BypassForwardHook => lora ACTIVE`。
+- 24GB 4090 在整块驻留 DiT 的前提下，默认 `0.4MP + 124 帧` 会在采样激活峰值 OOM，
+  即使把 `--reserve-vram` 改为 0 也不能解决。当前已验证的安全配置是 `256x256`；需要更高
+  分辨率时先降低帧数或分辨率，不要误判为权重加载失败。
+
+### 13-F. 当前验收记录
+
+```text
+22 帧 / 256x256 / 6 steps：成功，H.264 + AAC，0.917s
+124 帧 / 256x256 / 6 steps：成功，H.264 + AAC，124 帧，5.167s
+text encoder：full load=True
+DiT：full load=True
+Larry：H3TURBO sampler + lora ACTIVE
+ref2va：未部署、无残留进程、无残留权重
+```
+
+修改启动参数、权重或自定义节点后，必须重启 ComfyUI，并重新执行一次最小 22 帧验收；
+SSH 下载和渲染命令要设置连接保活、远端超时和 `setsid/nohup`，不要让网络短暂中断造成
+前台任务永久挂起。

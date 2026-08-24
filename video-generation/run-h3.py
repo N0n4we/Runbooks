@@ -2,9 +2,10 @@
 """
 run-h3.py — MiniMax H3 全模态视频生成一键跑（多目标机，见 HOSTS / --host）
 
-目标机档位（--host，缺省 5090）：
+目标机档位（--host，缺省 kk14590）：
   5090  PER3cU@wp08:21054  RTX 5090 32G sm_120  → int8 convrot（triton 加速）
   4090  kIYRa5@wp08:25304  RTX 4090 24G sm_89   → int4/mixed convrot（eager）
+  kk14590 KKujSt@wp08:14590 RTX 4090 24G sm_89  → INT8 ConvRot + NVFP4 encoder + Larry
 
 底图：四个新工作流（Qwen3VL 版，均含 VideoHelperSuite / KJNodes / Easy-Use /
 Upscaler-Tensorrt / Rife-Tensorrt / AILab QwenVL 等第三方节点）：
@@ -63,8 +64,12 @@ HOSTS = {
              "dit": "int8",  "clip": "int8",  "vram": 32},
     "4090": {"srv": "kIYRa5@wp08.unicorn.org.cn", "port": 25304,
              "dit": "int4",  "clip": "int4",  "vram": 24},
+    # 用户指定的现役部署目标：24G 4090。NVFP4-AWQ encoder 约15.7G，
+    # pruned INT8 ConvRot DiT 约21G，分别整载到显存可行；同一任务中由 ComfyUI 串行换载。
+    "kk14590": {"srv": "KKujSt@wp08.unicorn.org.cn", "port": 14590,
+                "dit": "int8", "clip": "nvfp4", "vram": 24},
 }
-DEFAULT_HOST = "5090"
+DEFAULT_HOST = "kk14590"
 SRV, PORT = HOSTS[DEFAULT_HOST]["srv"], HOSTS[DEFAULT_HOST]["port"]
 SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15"]  # TOFU：首连收指纹并记录；绝不用 no
@@ -114,6 +119,7 @@ DIT_VARIANTS = {
 CLIP_VARIANTS = {
     "int8": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",   # 25.28G
     "int4": "qwen3vl_32b_minimax_h3_int4_convrot.safetensors",   # 13.93G
+    "nvfp4": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",     # 15.7G
 }
 # 运行期由 --host / --dit / --clip 覆盖（见 main()）
 UNET_FL2VA, UNET_REF2VA = DIT_VARIANTS[HOSTS[DEFAULT_HOST]["dit"]]
@@ -245,6 +251,38 @@ def insert_lora(g, unet_id, lora_name, strength):
     for _, tgt, tslot in targets:
         g.link(lid, 0, tgt, tslot, "MODEL")
     return lid
+
+
+def insert_larry_lora(g, unet_id, sampler_id, lora_name, strength):
+    """插入 Larry H3 Turbo 的专用 LoRA + sampler 节点。
+
+    Larry 的 LoRA 不是只把权重接到普通 LoraLoaderModelOnly 就结束：它还提供
+    MiniMaxH3TurboSampler，用于 4--8 步时的 H3 视频/音频双时钟采样。模型链仍
+    按普通 MODEL patch 方式接管 UNET 的全部出边，因此和 SigmaShift 可叠加：
+    UNET → Larry → SigmaShift → {BasicScheduler/BasicGuider}。
+    """
+    pos = g.nm[unet_id]["pos"]
+    lid = g.add_node("MiniMaxH3TurboLoRA", [lora_name, strength, False],
+                     [("MODEL", "MODEL")], [pos[0] + 180, pos[1] - 60],
+                     title=f"Larry H3 Turbo: {lora_name}")
+    targets = [(g._l(l, "id"), g._l(l, "target_id"), g._l(l, "target_slot"))
+               for l in list(g.links)
+               if g._l(l, "origin_id") == unet_id and g._l(l, "type") == "MODEL"]
+    for old_lid, _tgt, _tslot in targets:
+        g.cut_link(old_lid)
+    g.link(unet_id, 0, lid, 0, "MODEL", name="model")
+    for _, tgt, tslot in targets:
+        g.link(lid, 0, tgt, tslot, "MODEL")
+
+    # The custom sampler replaces KSamplerSelect's SAMPLER output at the
+    # SamplerCustomAdvanced node; its scheduler/sigmas remain unchanged.
+    sid = g.add_node("MiniMaxH3TurboSampler", [], [("SAMPLER", "SAMPLER")],
+                     [pos[0] + 520, pos[1] + 180], title="Larry H3 Turbo Sampler")
+    _idx, sinp = g.input_slot(sampler_id, "sampler")
+    if sinp is not None and sinp.get("link") is not None:
+        g.cut_link(sinp["link"])
+    g.link(sid, 0, sampler_id, _idx, "SAMPLER")
+    return lid, sid
 
 
 def parse_lora(spec):
@@ -453,11 +491,16 @@ def apply_params(g_top, g_sg, args, seed, frames, frames_direct, mode):
         sa = args.shift_audio if args.shift_audio is not None else 3.0
         insert_sigma_shift(g_sg, 6, sv, sa)
 
-    # --- LoRA（task 8）：--lora NAME[:strength] 时插 LoraLoaderModelOnly，接管 UNET #6
-    #     全部 MODEL 出边（与 shift 叠加则落在 UNET 与 SigmaShift 之间，见 insert_lora）---
+    # --- LoRA（task 8）：Larry Turbo 自动使用专用节点；其它文件保持原生节点兼容。---
     if args.lora:
         lname, lstrength = parse_lora(args.lora)
-        insert_lora(g_sg, 6, lname, lstrength)
+        use_larry = (args.lora_backend == "larry" or
+                     (args.lora_backend == "auto" and
+                      any(x in lname.lower() for x in ("larry", "turbo"))))
+        if use_larry:
+            insert_larry_lora(g_sg, 6, 14, lname, lstrength)
+        else:
+            insert_lora(g_sg, 6, lname, lstrength)
 
 
 def patch_size(g, tgt_id, w_name, h_name, args, widgets_node=None, wv_w=1, wv_h=2):
@@ -920,16 +963,19 @@ def main():
     g_gen.add_argument("--ref-image-size", choices=["match", "max"], default="match",
                        help="R2V 参考图缩放：match=跟画布（快）；max=2048 短边（身份更保真，慢数倍）")
     g_gen.add_argument("--lora", default=None, metavar="NAME[:strength]",
-                       help="追加 LoRA：在 UNETLoader 后插 LoraLoaderModelOnly 接管全部 MODEL "
-                            "出边（引导器与调度器共用这份 patched model）。strength 缺省 1.0，"
-                            "如 --lora riding_pose_H3_i2v_v1.0.safetensors:0.8")
+                       help="追加 LoRA：turbo/larry 文件名自动接 Larry 专用 LoRA+双时钟 sampler；"
+                            "其它文件使用 LoraLoaderModelOnly。strength 缺省 1.0，"
+                            "如 --lora minimax_h3_turbo_v4_step600_ema.safetensors:1.0")
+    g_gen.add_argument("--lora-backend", choices=["auto", "larry", "native"], default="auto",
+                       help="LoRA 接法：auto 根据文件名含 turbo/larry 自动启用 Larry 专用双时钟节点；"
+                            "larry 强制启用，native 使用普通 LoraLoaderModelOnly")
     g_gen.add_argument("--dit", choices=list(DIT_VARIANTS), default=None,
-                       help="DiT 量化档位（缺省随 --host：5090→int8、4090→int4）。"
+                       help="DiT 量化档位（缺省随 --host：5090→int8、4090→int4、kk14590→int8 ConvRot）。"
                             "int8/fp8 走 triton 加速核；int4/mixed 的 w4a4 段只能 eager 反量化。"
                             "换档前须确认目标机已下载对应权重——两个来源命名不同，见 DIT_VARIANTS")
     g_gen.add_argument("--clip", choices=list(CLIP_VARIANTS), default=None,
-                       help="文本编码器档位（缺省随 --host：5090→int8 25.28G、4090→int4 13.93G）。"
-                            "int8 需 32G 显存才能整块驻留；24G 上会被迫 offload 到 CPU，极慢")
+                       help="文本编码器档位（缺省随 --host：5090→int8、4090→int4、kk14590→NVFP4 15.7G）。"
+                            "kk14590 的 NVFP4 encoder 可整块装入 24G 显存；旧 int8 encoder 不行")
     # ---- task 7 旁路/降级开关（缺省全部启用降级；显式恢复对应链）----
     g_gen.add_argument("--enhance", action="store_true",
                        help="启用 QwenVL 提示词增强链（缺省旁路：原始 prompt 直达 sampler；"
@@ -967,8 +1013,8 @@ def main():
         args.dit = prof["dit"]
     if args.clip is None:
         args.clip = prof["clip"]
-    # 显存兜底告警：int8 编码器 25.28G 在 24G 卡上会被迫 offload 到 CPU（极慢），
-    # 这是「能跑但不该跑」的配置，报警而不拦，因为 --server 可能指向别的卡。
+    # 显存兜底告警：旧 int8 encoder 25.28G 在 24G 卡上会被迫 offload 到 CPU；
+    # 本目标默认 NVFP4 encoder 约15.7G，可以整块驻显存。
     if args.clip == "int8" and prof["vram"] < 32:
         print(f"!! 警告：--clip int8（25.28G）在 {args.host} 档位（{prof['vram']}G）上"
               f"无法整块驻留显存，会 offload 到 CPU 并极慢；24G 卡应用 --clip int4",
@@ -1082,7 +1128,8 @@ def main():
         print(f"  shift: --shift-video={args.shift_video!r} --shift-audio={args.shift_audio!r}  "
               f"SigmaShift 节点={shift_ids!r}", flush=True)
         # LoRA（task8）：确认 LoraLoaderModelOnly 已插入、强度已应用、UNET MODEL 出边已改道
-        lora_nodes = [n for n in sg[0]["nodes"] if n["type"] == "LoraLoaderModelOnly"]
+        lora_nodes = [n for n in sg[0]["nodes"]
+                      if n["type"] in ("LoraLoaderModelOnly", "MiniMaxH3TurboLoRA")]
         g_dbg = Graph(wf, sg[0]["nodes"], sg[0]["links"])   # 只为读 link 字段（格式无关）
         def _model_dsts(oid):   # 某节点 MODEL 出边落向的 (target_id, target_slot)
             return [(g_dbg._l(l, "target_id"), g_dbg._l(l, "target_slot"))
@@ -1091,9 +1138,12 @@ def main():
         if lora_nodes:
             ln = lora_nodes[0]
             print("[dry-run] LoRA 接线（task8）:", flush=True)
-            print(f"  LoraLoaderModelOnly#{ln['id']} widgets(name,strength)={ln['widgets_values']!r}",
+            print(f"  {ln['type']}#{ln['id']} widgets={ln['widgets_values']!r}",
                   flush=True)
-            print(f"  UNET#6 MODEL→{_model_dsts(6)!r}  LoRA#{ln['id']} MODEL→{_model_dsts(ln['id'])!r}",
+            turbo_samplers = [n for n in sg[0]["nodes"]
+                              if n["type"] == "MiniMaxH3TurboSampler"]
+            print(f"  UNET#6 MODEL→{_model_dsts(6)!r}  LoRA#{ln['id']} MODEL→{_model_dsts(ln['id'])!r}"
+                  f"  LarrySampler={[n['id'] for n in turbo_samplers]!r}",
                   flush=True)
         else:
             print(f"[dry-run] LoRA: --lora={args.lora!r}（未插入 LoraLoaderModelOnly）", flush=True)
@@ -1194,7 +1244,7 @@ def main():
     # 完成判定改用「哨兵文件出现」而非 pgrep：pgrep 'comfy run' 会匹配到**别人**那一发，
     # 并发时会误判（别人没跑完就以为自己没完，别人退出就以为自己完了）。
     ssh(args.server, args.ssh_port,
-        f"export PATH=$HOME/.local/bin:$PATH; rm -f {rc_remote}; "
+        f"export PATH=$HOME/h3-venv/bin:$HOME/.local/bin:$PATH; rm -f {rc_remote}; "
         f"setsid nohup bash -c 'comfy run --workflow {wf_remote} "
         f"--host 127.0.0.1 --port 8188 --wait --verbose --timeout 10800 "
         f"> {log_remote} 2>&1; echo $? > {rc_remote}' </dev/null >/dev/null 2>&1 & "
